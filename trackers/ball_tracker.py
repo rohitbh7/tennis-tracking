@@ -16,23 +16,12 @@ class BallTracker:
         self.model = self.model.to(device)
         self.model.eval()
 
-        # TrackNet inference resolution
         self.infer_width = 640
         self.infer_height = 360
-
-        # Resolution the model was trained on (used for coordinate scaling)
         self.train_width = 1280
         self.train_height = 720
 
     def detect_frames(self, frames, extrapolation=True):
-        """
-        Run ball tracking on a list of video frames.
-        :params
-            frames: list of video frames (numpy arrays)
-            extrapolation: whether to interpolate over gaps in detection
-        :return
-            ball_track: list of (x, y) tuples or (None, None) for each frame
-        """
         ball_track, dists = self._infer(frames)
         ball_track = self._remove_outliers(ball_track, dists)
 
@@ -46,15 +35,6 @@ class BallTracker:
         return ball_track
 
     def draw_bboxes(self, frames, ball_track, trace=7):
-        """
-        Draw ball track circles onto frames.
-        :params
-            frames: list of video frames
-            ball_track: list of (x, y) tuples or (None, None)
-            trace: number of trailing frames to draw
-        :return
-            output_frames: list of annotated frames
-        """
         output_frames = []
         for num, frame in enumerate(frames):
             frame = frame.copy()
@@ -106,7 +86,28 @@ class BallTracker:
 
         return ball_track, dists
 
-    def _remove_outliers(self, ball_track, dists, max_dist=100):
+    def _remove_outliers(self, ball_track, dists, max_dist=100, context_window=5, max_context_dist=50):
+        """
+        Extends the original outlier removal with a context window check.
+
+        For isolated detections — where both immediate neighbors are None and therefore
+        dists are -1 on both sides — the original logic never flags them as outliers at
+        all because neither dist exceeds max_dist. This pass handles that blind spot.
+
+        For each isolated detection we search outward up to `context_window` frames in
+        both directions to find the nearest real detections before and after the gap.
+        We then ask: is this isolated point plausible given the trajectory implied by
+        those anchor detections?
+
+        Plausibility is measured by projecting linearly from the two anchors to estimate
+        where the ball *should* be at the isolated frame, then checking whether the actual
+        detection is within `max_context_dist` pixels of that estimate. If no anchor
+        exists on one side, we fall back to a simple distance check from whichever anchor
+        we do have.
+
+        If the isolated detection fails this check, it is wiped to (None, None).
+        """
+        # Run the original distance-based outlier removal first
         outliers = list(np.where(np.array(dists) > max_dist)[0])
         for i in outliers:
             if (dists[i + 1] > max_dist) | (dists[i + 1] == -1):
@@ -114,6 +115,70 @@ class BallTracker:
                 outliers.remove(i)
             elif dists[i - 1] == -1:
                 ball_track[i - 1] = (None, None)
+
+        # Context window pass: catch isolated detections surrounded by blanks
+        for i in range(len(ball_track)):
+            if ball_track[i][0] is None:
+                continue
+
+            prev_none = (i == 0) or (ball_track[i - 1][0] is None)
+            next_none = (i == len(ball_track) - 1) or (ball_track[i + 1][0] is None)
+
+            if not (prev_none and next_none):
+                # Not isolated — already handled by the distance-based pass above
+                continue
+
+            # Find the nearest real detection before i
+            anchor_before = None
+            anchor_before_idx = None
+            for j in range(i - 1, max(i - 1 - context_window, -1), -1):
+                if ball_track[j][0] is not None:
+                    anchor_before = ball_track[j]
+                    anchor_before_idx = j
+                    break
+
+            # Find the nearest real detection after i
+            anchor_after = None
+            anchor_after_idx = None
+            for j in range(i + 1, min(i + 1 + context_window, len(ball_track))):
+                if ball_track[j][0] is not None:
+                    anchor_after = ball_track[j]
+                    anchor_after_idx = j
+                    break
+
+            if anchor_before is None and anchor_after is None:
+                # No context at all — cannot evaluate, leave it
+                continue
+
+            if anchor_before is not None and anchor_after is not None:
+                # Linearly interpolate between the two anchors to get an expected position
+                t_before = anchor_before_idx
+                t_after = anchor_after_idx
+                t = i
+                alpha = (t - t_before) / (t_after - t_before)
+                expected_x = anchor_before[0] + alpha * (anchor_after[0] - anchor_before[0])
+                expected_y = anchor_before[1] + alpha * (anchor_after[1] - anchor_before[1])
+                expected = (expected_x, expected_y)
+            elif anchor_before is not None:
+                # Only a before-anchor: check raw distance from it, scaled by frame gap
+                gap = i - anchor_before_idx
+                expected = anchor_before
+                max_context_dist_scaled = max_context_dist * gap
+                if distance.euclidean(ball_track[i], expected) > max_context_dist_scaled:
+                    ball_track[i] = (None, None)
+                continue
+            else:
+                # Only an after-anchor: same idea
+                gap = anchor_after_idx - i
+                expected = anchor_after
+                max_context_dist_scaled = max_context_dist * gap
+                if distance.euclidean(ball_track[i], expected) > max_context_dist_scaled:
+                    ball_track[i] = (None, None)
+                continue
+
+            if distance.euclidean(ball_track[i], expected) > max_context_dist:
+                ball_track[i] = (None, None)
+
         return ball_track
 
     def _split_track(self, ball_track, max_gap=4, max_dist_gap=80, min_track=5):

@@ -53,6 +53,17 @@ def save_pose_csv(pose_detections, output_csv="pose_output.csv"):
                     p2x,
                     p2y
                 ])
+def save_ball_csv(ball_detections, output_csv="ball_coords.csv"):
+    """
+    Writes CSV with columns:
+    frame, ball_x, ball_y
+    """
+    with open(output_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["frame", "ball_x", "ball_y"])
+
+        for frame_idx, (x, y) in enumerate(ball_detections):
+            writer.writerow([frame_idx, x, y])
 
 def main():
     parser = argparse.ArgumentParser(description="Tennis video analysis pipeline.")
@@ -66,7 +77,7 @@ def main():
     )
     args = parser.parse_args()
  
-    input_video_path = "input_videos/point.mp4"
+    input_video_path = "input_videos/clip.mp4"
     video_frames = read_video(input_video_path)
  
     # Court
@@ -88,6 +99,7 @@ def main():
     # Ball
     ball_tracker = BallTracker(model_path="model_best.pt", device='cpu')
     ball_detections = ball_tracker.detect_frames(video_frames, extrapolation=True)
+    save_ball_csv(ball_detections, "output_videos/ball_coords.csv")
 
     # Shots
     #shot_tracker = ShotTracker(
