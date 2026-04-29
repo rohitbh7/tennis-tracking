@@ -24,8 +24,9 @@ class BallTracker:
     def detect_frames(self, frames, extrapolation=True):
         ball_track, dists = self._infer(frames)
         ball_track = self._remove_outliers(ball_track, dists)
-
         if extrapolation:
+            none_frames = [i for i, (x, y) in enumerate(ball_track) if x is None]
+            print("None frames before split:", none_frames)
             subtracks = self._split_track(ball_track)
             for r in subtracks:
                 ball_subtrack = ball_track[r[0]:r[1]]
@@ -179,9 +180,67 @@ class BallTracker:
             if distance.euclidean(ball_track[i], expected) > max_context_dist:
                 ball_track[i] = (None, None)
 
+        # Paired outlier pass: catch two consecutive detections surrounded by blanks.
+        # Each point is evaluated independently by pretending its partner doesn't exist.
+        for i in range(len(ball_track) - 1):
+            if ball_track[i][0] is None or ball_track[i + 1][0] is None:
+                continue
+
+            prev_none = (i == 0) or (ball_track[i - 1][0] is None)
+            next_none = (i + 1 == len(ball_track) - 1) or (ball_track[i + 2][0] is None)
+
+            if not (prev_none and next_none):
+                continue
+
+            # Evaluate each point of the pair as if it were isolated
+            for idx in [i, i + 1]:
+                if ball_track[idx][0] is None:
+                    continue  # already wiped by earlier evaluation of the other point
+
+                # Find nearest real detection before idx, skipping the partner
+                anchor_before = None
+                anchor_before_idx = None
+                for j in range(idx - 1, max(idx - 1 - context_window, -1), -1):
+                    if j == (i + 1 if idx == i else i):
+                        continue  # skip the partner
+                    if ball_track[j][0] is not None:
+                        anchor_before = ball_track[j]
+                        anchor_before_idx = j
+                        break
+
+                # Find nearest real detection after idx, skipping the partner
+                anchor_after = None
+                anchor_after_idx = None
+                for j in range(idx + 1, min(idx + 1 + context_window, len(ball_track))):
+                    if j == (i + 1 if idx == i else i):
+                        continue  # skip the partner
+                    if ball_track[j][0] is not None:
+                        anchor_after = ball_track[j]
+                        anchor_after_idx = j
+                        break
+
+                if anchor_before is None and anchor_after is None:
+                    continue
+
+                if anchor_before is not None and anchor_after is not None:
+                    alpha = (idx - anchor_before_idx) / (anchor_after_idx - anchor_before_idx)
+                    expected_x = anchor_before[0] + alpha * (anchor_after[0] - anchor_before[0])
+                    expected_y = anchor_before[1] + alpha * (anchor_after[1] - anchor_before[1])
+                    expected = (expected_x, expected_y)
+                    if distance.euclidean(ball_track[idx], expected) > max_context_dist:
+                        ball_track[idx] = (None, None)
+                elif anchor_before is not None:
+                    gap = idx - anchor_before_idx
+                    if distance.euclidean(ball_track[idx], anchor_before) > max_context_dist * gap:
+                        ball_track[idx] = (None, None)
+                else:
+                    gap = anchor_after_idx - idx
+                    if distance.euclidean(ball_track[idx], anchor_after) > max_context_dist * gap:
+                        ball_track[idx] = (None, None)
+
         return ball_track
 
-    def _split_track(self, ball_track, max_gap=4, max_dist_gap=80, min_track=5):
+    def _split_track(self, ball_track, max_gap=8, max_dist_gap=80, min_track=5):
         list_det = [0 if x[0] else 1 for x in ball_track]
         groups = [(k, sum(1 for _ in g)) for k, g in groupby(list_det)]
         cursor = 0

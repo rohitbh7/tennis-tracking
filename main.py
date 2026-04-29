@@ -4,6 +4,38 @@ from utils import read_video, save_video, draw_axes
 from trackers import PlayerTracker, PoseDetector, BallTracker, ShotTracker
 import argparse
 import csv
+import cv2
+
+def draw_frame_numbers(frames):
+    output = []
+    for i, frame in enumerate(frames):
+        f = frame.copy()
+        h, w = f.shape[:2]
+
+        text = f"Frame: {i}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.7
+        thickness = 2
+
+        (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+
+        x = w - tw - 10   # right padding
+        y = th + 10       # top padding
+
+        cv2.putText(
+            f,
+            text,
+            (x, y),
+            font,
+            scale,
+            (255, 255, 255),   # white text
+            thickness,
+            cv2.LINE_AA
+        )
+
+        output.append(f)
+
+    return output
 
 def make_blank_frames(video_frames):
     """Return a list of black frames matching the shape of the input frames."""
@@ -75,9 +107,19 @@ def main():
             "video frames. Court lines are drawn instead of raw keypoint dots."
         ),
     )
+    parser.add_argument(
+        "p1_hand",
+        choices=["right", "left"],
+        help="Player 1 handedness (top of screen).",
+    )
+    parser.add_argument(
+        "p2_hand",
+        choices=["right", "left"],
+        help="Player 2 handedness (bottom of screen).",
+    )
     args = parser.parse_args()
  
-    input_video_path = "input_videos/clip.mp4"
+    input_video_path = "input_videos/sinner_alcaraz_point.mp4"
     video_frames = read_video(input_video_path)
  
     # Court
@@ -90,26 +132,35 @@ def main():
         video_frames, read_from_stub=False, stub_path="tracker_stubs/player_detection.pkl"
     )
     player_detections = player_tracker.choose_and_filter_players(court_keypoints, player_detections)
- 
+    
     # Poses
     pose_detector = PoseDetector()
     pose_detections = pose_detector.detect_frames(video_frames, player_detections=player_detections)
     save_pose_csv(pose_detections, "output_videos/pose_joints.csv")
  
+    
     # Ball
     ball_tracker = BallTracker(model_path="model_best.pt", device='cpu')
     ball_detections = ball_tracker.detect_frames(video_frames, extrapolation=True)
     save_ball_csv(ball_detections, "output_videos/ball_coords.csv")
 
     # Shots
-    #shot_tracker = ShotTracker(
-    #    minimum_change_frames=25,   # frames the vertical direction change must persist
-    #    rolling_window=5,           # smoothing window for mid_y
-    #    wrist_proximity_px=160.0,   # px radius around ball to check for joints
-    #    persist_frames=20,          # circle stays visible for 20 frames
-    #)
-    #shot_frames = shot_tracker.detect_shots(ball_detections, pose_detections)
-    #print(f"Detected {len(shot_frames)} shot(s) at frames: {sorted(shot_frames.keys())}")
+    shot_tracker = ShotTracker(
+        minimum_change_frames=15,   # frames the vertical direction change must persist
+        rolling_window=5,           # smoothing window for mid_y
+        wrist_proximity_px=125.0,   # px radius around ball to check for joints
+        persist_frames=20,          # circle stays visible for 20 frames
+        p1_handedness=args.p1_hand,
+        p2_handedness=args.p2_hand,
+    )
+    frame_height, frame_width = video_frames[0].shape[:2]
+    shot_frames = shot_tracker.detect_shots(
+        ball_detections, pose_detections,
+        frame_height=frame_height,
+        frame_width=frame_width,
+    )
+    print(f"Detected {len(shot_frames)} shot(s) at frames: {sorted(shot_frames.keys())}")
+    
  
     # Use blank frames as the canvas if --annotations-only is set
     canvas_frames = make_blank_frames(video_frames) if args.annotations_only else video_frames
@@ -130,7 +181,7 @@ def main():
     output_video_frames = ball_tracker.draw_bboxes(output_video_frames, ball_detections)
 
     # Draw shot markers (on top of everything else so they're clearly visible)
-    #output_video_frames = shot_tracker.draw_shot_markers(output_video_frames, shot_frames)
+    output_video_frames = shot_tracker.draw_shot_markers(output_video_frames, shot_frames)
 
     output_video_frames = pose_detector.draw_poses(output_video_frames, pose_detections)
  
@@ -139,6 +190,7 @@ def main():
         if args.annotations_only
         else "output_videos/output.mp4"
     )
+    output_video_frames = draw_frame_numbers(output_video_frames)
     save_video(output_video_frames, output_path)
     print(f"Done! Saved to {output_path}")
 
