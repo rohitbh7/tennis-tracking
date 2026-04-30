@@ -237,6 +237,50 @@ class BallTracker:
                     gap = anchor_after_idx - idx
                     if distance.euclidean(ball_track[idx], anchor_after) > max_context_dist * gap:
                         ball_track[idx] = (None, None)
+        # Spike pass: single detection flanked by two real neighbors where both distances
+        # exceed max_dist.  The first-pass loop misses this when the list-mutation-during-
+        # iteration bug causes the frame to be skipped, and the isolated/paired passes skip
+        # it because neither neighbor is None.
+        for i in range(1, len(ball_track) - 1):
+            if ball_track[i][0] is None:
+                continue
+            if ball_track[i - 1][0] is None or ball_track[i + 1][0] is None:
+                continue
+            d_prev = distance.euclidean(ball_track[i - 1], ball_track[i])
+            d_next = distance.euclidean(ball_track[i], ball_track[i + 1])
+            if d_prev > max_dist and d_next > max_dist:
+                ball_track[i] = (None, None)
+
+        # Startup prefix pass: catch 1–2 bogus frames at the start of a consecutive run
+        # (right after a None gap) that are internally coherent but make a large jump into
+        # the real tracking that follows them in the same run.  The previous small-group
+        # pass failed here because frames 108-109 are immediately followed by real tracking
+        # at 110+, so the group-finding loop walked past them and the group size exceeded 2.
+        for i in range(len(ball_track)):
+            if ball_track[i][0] is None:
+                continue
+            if i > 0 and ball_track[i - 1][0] is not None:
+                continue  # not the start of a post-gap group
+
+            g_end = i
+            while g_end + 1 < len(ball_track) and ball_track[g_end + 1][0] is not None:
+                g_end += 1
+            for p in range(1, 3):  # try prefix lengths 1 and 2
+                split = i + p
+                if split >= len(ball_track) or ball_track[split][0] is None:
+                    break  # not enough real frames to compare against
+                # prefix must be internally coherent (no large jumps within it)
+                prefix_coherent = all(
+                    distance.euclidean(ball_track[k], ball_track[k + 1]) <= max_dist
+                    for k in range(i, split - 1)
+                )
+                if not prefix_coherent:
+                    break
+                jump = distance.euclidean(ball_track[split - 1], ball_track[split])
+                if jump > max_dist * 3:
+                    for k in range(i, split):
+                        ball_track[k] = (None, None)
+                    break
 
         return ball_track
 
