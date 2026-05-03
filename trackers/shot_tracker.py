@@ -42,9 +42,11 @@ class ShotTracker:
     Signals 1 & 2 are the primary detectors. Signal 3 plays two roles:
 
       - Precision refinement: if a closing velocity candidate falls within
-        `dedup_window` frames of a trajectory candidate, it replaces the trajectory
-        frame as the more precise contact timestamp (correcting rolling-average lag
-        without hardcoding a fixed -1 offset).
+        `dedup_window` frames of a trajectory candidate, and the closing velocity
+        fires no more than `rolling_window` frames before the trajectory candidate,
+        the earlier of the two timestamps is used. This corrects rolling-average lag
+        (which can delay trajectory detection by up to rolling_window-1 frames)
+        without accepting approach/windup local minima that fire much earlier.
 
       - Standalone fallback: if a closing velocity candidate has no nearby trajectory
         signal (e.g. a flat shot with no vertical/horizontal reversal), it is accepted
@@ -164,17 +166,20 @@ class ShotTracker:
             ]
             if nearby_traj:
                 closest = min(nearby_traj, key=lambda f: abs(cv_frame - f))
-                if cv_frame >= closest:
-                    # Closing vel fires at or after the traj candidate — use it as the
-                    # more precise contact timestamp (corrects rolling-average lag)
-                    refined[closest] = cv_frame
-                    consumed_traj.add(closest)
-                elif cv_dist <= self.closing_velocity_standalone_px:
-                    # Closing vel fires before the traj candidate but is extremely close —
-                    # treat as standalone (e.g. approach local min that is genuinely contact)
-                    standalone_closing.append(cv_frame)
-                # else: closing vel fires earlier and isn't tight enough — ignore it,
-                # the trajectory candidate is more reliable
+                if cv_dist <= self.closing_velocity_px:
+                    lag = closest - cv_frame  # positive = cv fires before trajectory
+                    if lag <= self.rolling_window:
+                        # Closing vel fires within the rolling-average lag window —
+                        # this is genuine lag correction. Take the earlier timestamp.
+                        refined[closest] = min(cv_frame, closest)
+                        consumed_traj.add(closest)
+                    elif lag <= 0:
+                        # Closing vel fires at or after trajectory — take the earlier
+                        # (trajectory) timestamp; closing vel may be follow-through.
+                        refined[closest] = closest
+                        consumed_traj.add(closest)
+                    # else: cv fires too far before trajectory — approach artifact,
+                    # keep trajectory candidate unchanged
             elif cv_dist <= self.closing_velocity_standalone_px:
                 # No trajectory signal nearby — only accept if extremely close
                 standalone_closing.append(cv_frame)
@@ -464,6 +469,17 @@ class ShotTracker:
 
             if not (negative_change or positive_change):
                 continue
+
+            # Require the frame before i to have the same direction as d_i so that
+            # a single-frame noise dip (old direction never truly established) cannot
+            # arm the trigger and steal credit from the real direction change that
+            # follows several frames later.
+            d_prev = df['delta'].iloc[i - 1] if i > 0 else np.nan
+            if not np.isnan(d_prev):
+                if negative_change and d_prev <= 0:
+                    continue
+                if positive_change and d_prev >= 0:
+                    continue
 
             change_count = 0
             for j in range(i + 1, i + lookahead + 1):

@@ -84,10 +84,9 @@ class BallTracker:
             else:
                 dist = -1
             dists.append(dist)
-
         return ball_track, dists
 
-    def _remove_outliers(self, ball_track, dists, max_dist=100, context_window=5, max_context_dist=50):
+    def _remove_outliers(self, ball_track, dists, max_dist=100, context_window=10, max_context_dist=50):
         """
         Extends the original outlier removal with a context window check.
 
@@ -117,68 +116,77 @@ class BallTracker:
             elif dists[i - 1] == -1:
                 ball_track[i - 1] = (None, None)
 
-        # Context window pass: catch isolated detections surrounded by blanks
-        for i in range(len(ball_track)):
-            if ball_track[i][0] is None:
-                continue
+        # Context window pass: catch isolated detections surrounded by blanks.
+        # Runs repeatedly until no new frames are wiped so that a bad isolated
+        # detection cannot shield a neighbour by acting as a plausible anchor.
+        while True:
+            wiped_any = False
+            for i in range(len(ball_track)):
+                if ball_track[i][0] is None:
+                    continue
 
-            prev_none = (i == 0) or (ball_track[i - 1][0] is None)
-            next_none = (i == len(ball_track) - 1) or (ball_track[i + 1][0] is None)
+                prev_none = (i == 0) or (ball_track[i - 1][0] is None)
+                next_none = (i == len(ball_track) - 1) or (ball_track[i + 1][0] is None)
 
-            if not (prev_none and next_none):
-                # Not isolated — already handled by the distance-based pass above
-                continue
+                if not (prev_none and next_none):
+                    # Not isolated — already handled by the distance-based pass above
+                    continue
 
-            # Find the nearest real detection before i
-            anchor_before = None
-            anchor_before_idx = None
-            for j in range(i - 1, max(i - 1 - context_window, -1), -1):
-                if ball_track[j][0] is not None:
-                    anchor_before = ball_track[j]
-                    anchor_before_idx = j
-                    break
+                # Find the nearest real detection before i
+                anchor_before = None
+                anchor_before_idx = None
+                for j in range(i - 1, max(i - 1 - context_window, -1), -1):
+                    if ball_track[j][0] is not None:
+                        anchor_before = ball_track[j]
+                        anchor_before_idx = j
+                        break
 
-            # Find the nearest real detection after i
-            anchor_after = None
-            anchor_after_idx = None
-            for j in range(i + 1, min(i + 1 + context_window, len(ball_track))):
-                if ball_track[j][0] is not None:
-                    anchor_after = ball_track[j]
-                    anchor_after_idx = j
-                    break
+                # Find the nearest real detection after i
+                anchor_after = None
+                anchor_after_idx = None
+                for j in range(i + 1, min(i + 1 + context_window, len(ball_track))):
+                    if ball_track[j][0] is not None:
+                        anchor_after = ball_track[j]
+                        anchor_after_idx = j
+                        break
 
-            if anchor_before is None and anchor_after is None:
-                # No context at all — cannot evaluate, leave it
-                continue
+                if anchor_before is None and anchor_after is None:
+                    # No context at all — cannot evaluate, leave it
+                    continue
 
-            if anchor_before is not None and anchor_after is not None:
-                # Linearly interpolate between the two anchors to get an expected position
-                t_before = anchor_before_idx
-                t_after = anchor_after_idx
-                t = i
-                alpha = (t - t_before) / (t_after - t_before)
-                expected_x = anchor_before[0] + alpha * (anchor_after[0] - anchor_before[0])
-                expected_y = anchor_before[1] + alpha * (anchor_after[1] - anchor_before[1])
-                expected = (expected_x, expected_y)
-            elif anchor_before is not None:
-                # Only a before-anchor: check raw distance from it, scaled by frame gap
-                gap = i - anchor_before_idx
-                expected = anchor_before
-                max_context_dist_scaled = max_context_dist * gap
-                if distance.euclidean(ball_track[i], expected) > max_context_dist_scaled:
+                if anchor_before is not None and anchor_after is not None:
+                    # Linearly interpolate between the two anchors to get an expected position
+                    t_before = anchor_before_idx
+                    t_after = anchor_after_idx
+                    t = i
+                    alpha = (t - t_before) / (t_after - t_before)
+                    expected_x = anchor_before[0] + alpha * (anchor_after[0] - anchor_before[0])
+                    expected_y = anchor_before[1] + alpha * (anchor_after[1] - anchor_before[1])
+                    expected = (expected_x, expected_y)
+                elif anchor_before is not None:
+                    # Only a before-anchor: check raw distance from it, scaled by frame gap
+                    gap = i - anchor_before_idx
+                    expected = anchor_before
+                    max_context_dist_scaled = max_context_dist * gap
+                    if distance.euclidean(ball_track[i], expected) > max_context_dist_scaled:
+                        ball_track[i] = (None, None)
+                        wiped_any = True
+                    continue
+                else:
+                    # Only an after-anchor: same idea
+                    gap = anchor_after_idx - i
+                    expected = anchor_after
+                    max_context_dist_scaled = max_context_dist * gap
+                    if distance.euclidean(ball_track[i], expected) > max_context_dist_scaled:
+                        ball_track[i] = (None, None)
+                        wiped_any = True
+                    continue
+
+                if distance.euclidean(ball_track[i], expected) > max_context_dist:
                     ball_track[i] = (None, None)
-                continue
-            else:
-                # Only an after-anchor: same idea
-                gap = anchor_after_idx - i
-                expected = anchor_after
-                max_context_dist_scaled = max_context_dist * gap
-                if distance.euclidean(ball_track[i], expected) > max_context_dist_scaled:
-                    ball_track[i] = (None, None)
-                continue
-
-            if distance.euclidean(ball_track[i], expected) > max_context_dist:
-                ball_track[i] = (None, None)
+                    wiped_any = True
+            if not wiped_any:
+                break
 
         # Paired outlier pass: catch two consecutive detections surrounded by blanks.
         # Each point is evaluated independently by pretending its partner doesn't exist.
@@ -281,6 +289,41 @@ class BallTracker:
                     for k in range(i, split):
                         ball_track[k] = (None, None)
                     break
+
+        # Tail suffix pass: catch the last detection before a gap whose extrapolated
+        # velocity overshoots the next post-gap detection.  When extrap_error > 1.5x
+        # actual_dist the ball would have needed to reverse course to reach its next
+        # observed position — strong evidence the tail detection is a false positive
+        # riding ahead of the true trajectory rather than a legitimate pre-bounce frame.
+        # A ball that was simply hit hard away from its current direction produces an
+        # extrap_error that is at most comparable to actual_dist (not much larger).
+        for i in range(len(ball_track) - 1):
+            if ball_track[i][0] is None:
+                continue
+            if ball_track[i + 1][0] is not None:
+                continue  # not the last frame before a gap
+            if i == 0 or ball_track[i - 1][0] is None:
+                continue  # need a prior detection to estimate velocity
+
+            # Find first detection after the gap (within context_window)
+            j = i + 1
+            while j < len(ball_track) and ball_track[j][0] is None:
+                j += 1
+            if j >= len(ball_track) or (j - i) > context_window:
+                continue
+
+            gap = j - i
+            vx = ball_track[i][0] - ball_track[i - 1][0]
+            vy = ball_track[i][1] - ball_track[i - 1][1]
+
+            ex = ball_track[i][0] + gap * vx
+            ey = ball_track[i][1] + gap * vy
+
+            extrap_error = distance.euclidean((ex, ey), ball_track[j])
+            actual_dist = distance.euclidean(ball_track[i], ball_track[j])
+
+            if extrap_error > actual_dist * 1.5 and extrap_error > max_dist:
+                ball_track[i] = (None, None)
 
         return ball_track
 
