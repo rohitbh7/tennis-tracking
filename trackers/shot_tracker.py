@@ -115,6 +115,12 @@ class ShotTracker:
         self.p1_handedness = p1_handedness.lower()
         self.p2_handedness = p2_handedness.lower()
         self.baseline_fraction = baseline_fraction
+        # Pre-shot stasis gate: reject detections where the ball was held still
+        # (e.g. serve preparation). Requires this many consecutive frames of
+        # nearly-identical ball position within the lookback window.
+        self.static_run_min: int = 5
+        self.static_run_px: float = 2.0
+        self.static_run_lookback: int = 20
 
     # ------------------------------------------------------------------
     # Public API
@@ -214,6 +220,9 @@ class ShotTracker:
                 if cx is None or cy is None:
                     continue
                 cx, cy = int(cx), int(cy)
+
+            if self._ball_was_held(ball_positions, frame_idx):
+                continue
 
             if self._player_near_ball(pose_detections, frame_idx, cx, cy):
                 label = self._classify_shot(
@@ -568,6 +577,41 @@ class ShotTracker:
     # ------------------------------------------------------------------
     # Pose proximity gate (shared by all signals)
     # ------------------------------------------------------------------
+
+    def _ball_was_held(self, ball_positions: list, frame_idx: int) -> bool:
+        """
+        Return True if the ball had a run of >= static_run_min consecutive
+        nearly-identical positions (within static_run_px) in the static_run_lookback
+        frames before frame_idx. This catches serve-preparation false positives where
+        the player holds the ball and the wrist proximity gate fires on the toss release.
+        """
+        start = max(0, frame_idx - self.static_run_lookback)
+        centers = []
+        for k in range(start, frame_idx):
+            pos = ball_positions[k]
+            if isinstance(pos, dict):
+                bbox = pos.get(1, [])
+                if not bbox or len(bbox) < 4:
+                    centers.append(None)
+                    continue
+                centers.append(((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2))
+            else:
+                bx, by = pos
+                centers.append((bx, by) if bx is not None and by is not None else None)
+
+        run = 0
+        for i in range(1, len(centers)):
+            a, b = centers[i - 1], centers[i]
+            if a is None or b is None:
+                run = 0
+                continue
+            if abs(a[0] - b[0]) <= self.static_run_px and abs(a[1] - b[1]) <= self.static_run_px:
+                run += 1
+                if run >= self.static_run_min - 1:
+                    return True
+            else:
+                run = 0
+        return False
 
     def _player_near_ball(
         self,
