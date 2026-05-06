@@ -89,7 +89,7 @@ class ShotTracker:
         wrist_proximity_px: float = 160.0,   # max px from ball to wrist/elbow (all signals)
         closing_velocity_px: float = 50.0,            # max dist to register a closing-velocity local minimum
         closing_velocity_standalone_px: float = 10.0, # tighter threshold when no trajectory signal nearby
-        dedup_window: int = 10,                       # frames within which candidates are merged
+        dedup_window: int = 15,                       # frames within which candidates are merged
         marker_color: tuple = (0, 255, 255),
         marker_radius: int = 18,
         marker_thickness: int = 3,

@@ -1,7 +1,7 @@
 import numpy as np
 from court_line_detector.court_line_detector import CourtLineDetector
 from utils import read_video, save_video, draw_axes
-from trackers import PlayerTracker, PoseDetector, BallTracker, ShotTracker
+from trackers import PlayerTracker, PoseDetector, BallTracker, ShotTracker, BounceTracker
 import argparse
 import csv
 import cv2
@@ -160,6 +160,13 @@ def main():
         frame_width=frame_width,
     )
     print(f"Detected {len(shot_frames)} shot(s) at frames: {sorted(shot_frames.keys())}")
+
+    # Bounces
+    bounce_tracker = BounceTracker()
+    bounce_frames = bounce_tracker.detect_bounces(
+        ball_detections, shot_frames=shot_frames, pose_detections=pose_detections
+    )
+    print(f"Detected {len(bounce_frames)} bounce(s) at frames: {sorted(bounce_frames.keys())}")
     
  
     # Use blank frames as the canvas if --annotations-only is set
@@ -179,6 +186,7 @@ def main():
         ]
  
     output_video_frames = ball_tracker.draw_bboxes(output_video_frames, ball_detections)
+    output_video_frames = bounce_tracker.draw_bounces(output_video_frames, bounce_frames)
 
     # Draw shot markers (on top of everything else so they're clearly visible)
     output_video_frames = shot_tracker.draw_shot_markers(output_video_frames, shot_frames)
