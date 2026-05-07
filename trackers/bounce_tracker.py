@@ -56,7 +56,7 @@ class BounceTracker:
         speed_shot_suppression: int = 3,       # window for speed path shot suppression
         peak_descent_px: float = 20.0,        # ball must drop this many px into the local peak
         peak_look_back: int = 8,               # frames to look back for the descent check
-        peak_look_forward: int = 5,               # frames ahead to check for continued descent
+        peak_look_forward: int = 2,               # frames ahead to check for continued descent
         peak_forward_tolerance_px: float = 10.0,  # if ball goes this much higher after i, skip
         persist_frames: int = 25,
         ellipse_color: tuple = (0, 200, 255),
@@ -376,10 +376,14 @@ class BounceTracker:
         peak_look_forward frames has a y value more than peak_forward_tolerance_px
         above yi. If the ball continues to a substantially higher y, this is a
         plateau mid-descent, not the true bounce peak. After a real bounce the
-        ball rises (y decreases), so this check naturally passes. The look-forward
-        window is intentionally shorter than look_back (5 vs 8) so that dribble
-        bounces — where the ball slowly creeps back toward court level over 6-10
-        frames before the player hits it — are not incorrectly suppressed.
+        ball rises (y decreases), so this check naturally passes.
+
+        peak_look_forward is kept very short (default 2) for two reasons:
+        1. A first-contact plateau (ball lands and rolls flat for 2-3 frames at
+           court y before the tracker shows it descending further) should be
+           accepted — a 2-frame window catches only the immediate next frames.
+        2. Dribble bounces where the ball slowly creeps back to court level over
+           6-10 frames before the player contacts it must not be suppressed.
         """
         n = len(df)
         y = df['mid_y'].values
