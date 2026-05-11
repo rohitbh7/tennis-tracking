@@ -225,11 +225,11 @@ class ShotTracker:
                 continue
 
             if self._player_near_ball(pose_detections, frame_idx, cx, cy):
-                label = self._classify_shot(
+                label, player_num = self._classify_shot(
                     frame_idx, cx, cy,
                     pose_detections, frame_height, frame_width,
                 )
-                shot_frames[frame_idx] = (cx, cy, label)
+                shot_frames[frame_idx] = (cx, cy, label, player_num)
 
         return shot_frames
 
@@ -314,7 +314,7 @@ class ShotTracker:
         """
         kp = pose_detections[frame_idx] if frame_idx < len(pose_detections) else None
         if kp is None or len(kp.xy) == 0:
-            return 'SHOT'
+            return 'SHOT', None
 
         # --- 1. Find the hitter by contact-joint proximity to the ball ---
         # This is robust regardless of frame resolution: we don't use ball_y vs
@@ -346,7 +346,7 @@ class ShotTracker:
                     hitting_avg_y = float(np.mean(valid_ys)) if valid_ys else None
 
         if hitting_player is None or hitting_avg_y is None:
-            return 'SHOT'
+            return 'SHOT', None
 
         # --- 2. Determine player number and handedness from the hitter's body position ---
         # Player 1 occupies the top half of the frame; Player 2 the bottom.
@@ -368,7 +368,7 @@ class ShotTracker:
             cx_vals.append(float(jx))
 
         if not cx_vals:
-            return 'SHOT'
+            return 'SHOT', player_num
         player_cx = float(np.mean(cx_vals))
 
         # --- 4. Overhead shot detection (ball above the player's head) ---
@@ -409,9 +409,9 @@ class ShotTracker:
                     at_baseline = ankle_y_mean < frame_height * self.baseline_fraction 
                 else: 
                     at_baseline = ankle_y_mean > frame_height * (1.0 - self.baseline_fraction) 
-                return 'SERVE' if at_baseline else 'SMASH' 
-            else: 
-                return 'SMASH'
+                return ('SERVE' if at_baseline else 'SMASH'), player_num
+            else:
+                return 'SMASH', player_num
 
         # --- 5. Groundstroke: FOREHAND vs BACKHAND ---
         ball_is_left = ball_x < player_cx
@@ -420,18 +420,18 @@ class ShotTracker:
             # Player 1 faces downward (top of screen).
             # Righty: racket arm is on the right side → left-of-body = forehand.
             if handedness == 'right':
-                return 'FOREHAND' if ball_is_left else 'BACKHAND'
+                return ('FOREHAND' if ball_is_left else 'BACKHAND'), player_num
             else:
-                return 'BACKHAND' if ball_is_left else 'FOREHAND'
+                return ('BACKHAND' if ball_is_left else 'FOREHAND'), player_num
         else:
             # Player 2 faces upward (bottom of screen) — left/right is mirrored
             # relative to broadcast view vs player's own body frame.
             # Righty: racket arm is on their right, which appears on the LEFT of
             # screen → ball right-of-body on screen = forehand.
             if handedness == 'right':
-                return 'FOREHAND' if not ball_is_left else 'BACKHAND'
+                return ('FOREHAND' if not ball_is_left else 'BACKHAND'), player_num
             else:
-                return 'BACKHAND' if not ball_is_left else 'FOREHAND'
+                return ('BACKHAND' if not ball_is_left else 'FOREHAND'), player_num
 
     # ------------------------------------------------------------------
     # Signal 1 & 2: Ball trajectory sustained direction reversal

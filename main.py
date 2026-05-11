@@ -41,16 +41,24 @@ def make_blank_frames(video_frames):
     """Return a list of black frames matching the shape of the input frames."""
     return [np.zeros_like(frame) for frame in video_frames]
 
+_COCO_JOINT_NAMES = [
+    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist", "left_hip", "right_hip",
+    "left_knee", "right_knee", "left_ankle", "right_ankle",
+]
+
 def save_pose_csv(pose_detections, output_csv="pose_output.csv"):
     """
     Writes CSV with columns:
-    frame, joint, player1_x, player1_y, player2_x, player2_y
+    frame, joint, joint_name, player1_x, player1_y, player2_x, player2_y
     """
     with open(output_csv, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "frame",
             "joint",
+            "joint_name",
             "player1_x",
             "player1_y",
             "player2_x",
@@ -76,15 +84,73 @@ def save_pose_csv(pose_detections, output_csv="pose_output.csv"):
             for joint_idx in range(num_joints):
                 p1x, p1y = player1[joint_idx]
                 p2x, p2y = player2[joint_idx]
+                joint_name = _COCO_JOINT_NAMES[joint_idx] if joint_idx < len(_COCO_JOINT_NAMES) else str(joint_idx)
 
                 writer.writerow([
                     frame_idx,
                     joint_idx,
+                    joint_name,
                     p1x,
                     p1y,
                     p2x,
                     p2y
                 ])
+_COURT_KEYPOINT_NAMES = [
+    "back-left baseline corner",
+    "back-right baseline corner",
+    "front-left baseline corner",
+    "front-right baseline corner",
+    "left alley back",
+    "left alley front",
+    "right alley back",
+    "right alley front",
+    "back service line left",
+    "back service line right",
+    "front service line left",
+    "front service line right",
+    "service box centre back",
+    "service box centre front",
+]
+
+def save_court_keypoints_csv(court_keypoints, output_csv="court_keypoints.csv"):
+    """
+    Writes CSV with columns:
+    keypoint_id, court_location, x, y
+    """
+    with open(output_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["keypoint_id", "court_location", "x", "y"])
+        for i in range(14):
+            x = court_keypoints[i * 2]
+            y = court_keypoints[i * 2 + 1]
+            writer.writerow([i, _COURT_KEYPOINT_NAMES[i], x, y])
+
+def save_events_csv(shot_frames, bounce_frames, output_csv="events.csv"):
+    """
+    Writes CSV with columns:
+    frame, event, player
+
+    shot_frames : dict  frame -> (cx, cy, label, player_num)
+    bounce_frames: dict frame -> (cx, cy)
+    """
+    rows = []
+
+    for frame, data in shot_frames.items():
+        label = data[2]
+        player_num = data[3]
+        player = f"player {player_num}" if player_num is not None else ""
+        rows.append((frame, label, player))
+
+    for frame in bounce_frames:
+        rows.append((frame, "bounce", ""))
+
+    rows.sort(key=lambda r: r[0])
+
+    with open(output_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["frame", "event", "player"])
+        writer.writerows(rows)
+
 def save_ball_csv(ball_detections, output_csv="ball_coords.csv"):
     """
     Writes CSV with columns:
@@ -125,6 +191,7 @@ def main():
     # Court
     court_line_detector = CourtLineDetector("keypoints_model.pth")
     court_keypoints = court_line_detector.predict(video_frames[0])
+    save_court_keypoints_csv(court_keypoints, "output_videos/court_keypoints.csv")
  
     # Players
     player_tracker = PlayerTracker(model_path="yolo12n.pt")
@@ -167,8 +234,8 @@ def main():
         ball_detections, shot_frames=shot_frames, pose_detections=pose_detections
     )
     print(f"Detected {len(bounce_frames)} bounce(s) at frames: {sorted(bounce_frames.keys())}")
-    
- 
+    save_events_csv(shot_frames, bounce_frames, "output_videos/events.csv")
+
     # Use blank frames as the canvas if --annotations-only is set
     canvas_frames = make_blank_frames(video_frames) if args.annotations_only else video_frames
  
