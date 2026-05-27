@@ -159,8 +159,8 @@ class PlayerTracker:
         court_width  = max_x - min_x
         court_height = max_y - min_y
 
-        corner_x_thresh = 0.12 * court_width
-        mid_y_thresh    = 0.20 * court_height
+        corner_x_thresh = 0.05 * court_width
+        mid_y_thresh    = 0.08 * court_height
 
         candidates = []
 
@@ -188,7 +188,7 @@ class PlayerTracker:
         candidates.sort(key=lambda x: -x[1])
         return candidates[0][0]
 
-    def choose_players(self, court_keypoints, player_dict, min_bbox_area: int = 8000):
+    def choose_players(self, court_keypoints, player_dict, min_bbox_area: int = 5000):
         """
         Pick one player from the top half and one from the bottom half of the court.
         Used for the initial frame-0 ID selection.
@@ -202,8 +202,12 @@ class PlayerTracker:
         court_width  = max_x - min_x
         court_height = max_y - min_y
 
-        corner_x_thresh = 0.12 * court_width
-        mid_y_thresh    = 0.20 * court_height
+        corner_x_thresh = 0.05 * court_width
+        mid_y_thresh    = 0.08 * court_height
+
+        print(f"[choose_players] court bounds: x=[{min_x:.0f},{max_x:.0f}] y=[{min_y:.0f},{max_y:.0f}] mid_y={court_mid_y:.0f}")
+        print(f"[choose_players] thresholds: corner_x={corner_x_thresh:.0f} mid_y={mid_y_thresh:.0f} min_area={min_bbox_area}")
+        print(f"[choose_players] raw detections in frame 0: {len(player_dict)}")
 
         top_candidates    = []
         bottom_candidates = []
@@ -211,13 +215,13 @@ class PlayerTracker:
         for track_id, bbox in player_dict.items():
             x1, y1, x2, y2 = bbox
             area = (x2 - x1) * (y2 - y1)
-            if area < min_bbox_area:
-                continue
             cx = (x1 + x2) / 2
             cy = (y1 + y2) / 2
-            if cx < min_x + corner_x_thresh or cx > max_x - corner_x_thresh:
-                continue
-            if abs(cy - court_mid_y) < mid_y_thresh:
+            fail_area   = area < min_bbox_area
+            fail_corner = cx < min_x + corner_x_thresh or cx > max_x - corner_x_thresh
+            fail_mid    = abs(cy - court_mid_y) < mid_y_thresh
+            print(f"  id={track_id} bbox=({x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}) area={area:.0f} cx={cx:.0f} cy={cy:.0f} | fail_area={fail_area} fail_corner={fail_corner} fail_mid={fail_mid}")
+            if fail_area or fail_corner or fail_mid:
                 continue
             if cy < court_mid_y:
                 top_candidates.append((track_id, area))
@@ -226,6 +230,9 @@ class PlayerTracker:
 
         top_candidates.sort(key=lambda x: -x[1])
         bottom_candidates.sort(key=lambda x: -x[1])
+
+        print(f"[choose_players] top_candidates={top_candidates}")
+        print(f"[choose_players] bottom_candidates={bottom_candidates}")
 
         chosen_players = []
         if top_candidates:

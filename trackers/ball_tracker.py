@@ -109,12 +109,13 @@ class BallTracker:
         """
         # Run the original distance-based outlier removal first
         outliers = list(np.where(np.array(dists) > max_dist)[0])
-        for i in outliers:
-            if (dists[i + 1] > max_dist) | (dists[i + 1] == -1):
-                ball_track[i] = (None, None)
-                outliers.remove(i)
-            elif dists[i - 1] == -1:
+        for i in list(outliers):
+            if dists[i - 1] == -1:
+                # Frame i-1 is the first detection after a gap; the large jump out of
+                # it makes it the likely false positive, not frame i.
                 ball_track[i - 1] = (None, None)
+            elif (dists[i + 1] > max_dist) | (dists[i + 1] == -1):
+                ball_track[i] = (None, None)
 
         # Context window pass: catch isolated detections surrounded by blanks.
         # Runs repeatedly until no new frames are wiped so that a bad isolated
@@ -325,9 +326,84 @@ class BallTracker:
             if extrap_error > actual_dist * 1.5 and extrap_error > max_dist:
                 ball_track[i] = (None, None)
 
+        # Stale-run pass: catch consecutive runs of near-identical positions
+        # that are inconsistent with the surrounding trajectory.  The tracker
+        # sometimes locks onto a wrong location and repeats the same coordinates
+        # for many frames.  The distance-based pass misses these because
+        # dists[i+1] inside the run is ~0 (never > max_dist), and the
+        # isolated/paired passes miss them because the run is long enough to
+        # have internal neighbours.
+        #
+        # NOTE: we do NOT use the entry jump as the trigger here, because the
+        # distance-based pass can wipe the predecessor before this pass runs,
+        # making the stale run appear to start right after a None rather than
+        # after a large jump.
+        #
+        # Strategy: find any run of ≥ min_stale_run consecutive frames that
+        # each move ≤ stale_threshold px.  Evaluate the run's plausibility by
+        # comparing its position to the linearly-interpolated trajectory between
+        # the nearest real detections on each side (within context_window).  If
+        # the run is more than max_dist px from that expected position, wipe it.
+        stale_threshold = 5.0   # max per-frame movement (px) within a stale run
+        min_stale_run = 5       # minimum run length to trigger evaluation
+        i = 0
+        while i < len(ball_track):
+            if ball_track[i][0] is None:
+                i += 1
+                continue
+            # Find the end of a near-identical run starting at i
+            run_end = i
+            while (run_end + 1 < len(ball_track) and
+                   ball_track[run_end + 1][0] is not None and
+                   distance.euclidean(ball_track[run_end],
+                                      ball_track[run_end + 1]) <= stale_threshold):
+                run_end += 1
+            run_len = run_end - i + 1
+
+            if run_len >= min_stale_run:
+                # Nearest valid detection before the run
+                anchor_before = None
+                anchor_before_idx = None
+                for j in range(i - 1, max(i - 1 - context_window, -1), -1):
+                    if ball_track[j][0] is not None:
+                        anchor_before = ball_track[j]
+                        anchor_before_idx = j
+                        break
+
+                # Nearest valid detection after the run
+                anchor_after = None
+                anchor_after_idx = None
+                for j in range(run_end + 1,
+                               min(run_end + 1 + context_window, len(ball_track))):
+                    if ball_track[j][0] is not None:
+                        anchor_after = ball_track[j]
+                        anchor_after_idx = j
+                        break
+
+                if anchor_before is not None or anchor_after is not None:
+                    # Expected position at the start of the run
+                    if anchor_before is not None and anchor_after is not None:
+                        t = ((i - anchor_before_idx) /
+                             (anchor_after_idx - anchor_before_idx))
+                        ex = (anchor_before[0] +
+                              t * (anchor_after[0] - anchor_before[0]))
+                        ey = (anchor_before[1] +
+                              t * (anchor_after[1] - anchor_before[1]))
+                    elif anchor_before is not None:
+                        ex, ey = anchor_before
+                    else:
+                        ex, ey = anchor_after
+
+                    run_pos = ball_track[i]
+                    if distance.euclidean(run_pos, (ex, ey)) > max_dist:
+                        for k in range(i, run_end + 1):
+                            ball_track[k] = (None, None)
+
+            i = run_end + 1
+
         return ball_track
 
-    def _split_track(self, ball_track, max_gap=8, max_dist_gap=80, min_track=5):
+    def _split_track(self, ball_track, max_gap=12, max_dist_gap=80, min_track=5):
         list_det = [0 if x[0] else 1 for x in ball_track]
         groups = [(k, sum(1 for _ in g)) for k, g in groupby(list_det)]
         cursor = 0
