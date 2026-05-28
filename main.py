@@ -1,7 +1,7 @@
 import numpy as np
 from court_line_detector.court_line_detector import CourtLineDetector
 from utils import read_video, save_video, draw_axes
-from trackers import PlayerTracker, PoseDetector, BallTracker, ShotTracker, BounceTracker
+from trackers import PlayerTracker, PoseDetector, BallTracker, ShotTracker2, BounceTracker
 import argparse
 import csv
 import cv2
@@ -173,19 +173,9 @@ def main():
             "video frames. Court lines are drawn instead of raw keypoint dots."
         ),
     )
-    parser.add_argument(
-        "p1_hand",
-        choices=["right", "left"],
-        help="Player 1 handedness (top of screen).",
-    )
-    parser.add_argument(
-        "p2_hand",
-        choices=["right", "left"],
-        help="Player 2 handedness (bottom of screen).",
-    )
     args = parser.parse_args()
  
-    input_video_path = "input_videos/sinner_alcaraz_point.mp4"
+    input_video_path = "input_videos/game/point 4.mp4"
     video_frames = read_video(input_video_path)
  
     # Court
@@ -212,13 +202,11 @@ def main():
     save_ball_csv(ball_detections, "output_videos/ball_coords.csv")
 
     # Shots
-    shot_tracker = ShotTracker(
-        minimum_change_frames=15,   # frames the vertical direction change must persist
-        rolling_window=5,           # smoothing window for mid_y
-        wrist_proximity_px=125.0,   # px radius around ball to check for joints
-        persist_frames=20,          # circle stays visible for 20 frames
-        p1_handedness=args.p1_hand,
-        p2_handedness=args.p2_hand,
+    shot_tracker = ShotTracker2(
+        wrist_proximity_px=100.0,    # px radius around ball to accept a contact minimum
+        min_velocity_change=12.0,    # |Δv| px/frame required to call it a shot
+        min_post_speed=7.0,          # ball must move at least this fast after contact
+        persist_frames=20,
     )
     frame_height, frame_width = video_frames[0].shape[:2]
     shot_frames = shot_tracker.detect_shots(

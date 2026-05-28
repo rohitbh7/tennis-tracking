@@ -58,8 +58,8 @@ class ShotTracker2:
         min_velocity_change: float = 12.0,  # |Δv| in px/frame to call it a shot
         min_post_speed: float = 7.0,        # ball must move at least this fast after contact
         vel_window: int = 2,                # frames averaged for pre/post velocity
-        static_run_min: int = 3,            # consecutive near-static frames = held ball
-        static_run_px: float = 3.0,         # max displacement per frame when "held"
+        static_run_min: int = 2,            # consecutive near-static frames = held ball
+        static_run_px: float = 8.0,         # max displacement per frame when "held"
         static_run_lookback: int = 25,      # how far back to search for a held run
         dedup_window: int = 15,             # minimum frames between consecutive shots
         marker_color: tuple = (0, 255, 255),
@@ -164,13 +164,7 @@ class ShotTracker2:
             if not confirmed and self._ball_was_held(centers, i):
                 continue
 
-            report_frame = i - 1
-            rx, ry = centers[report_frame]
-            if rx is None:
-                rx, ry = bx, by
-                report_frame = i
-
-            confirmed.append((report_frame, int(rx), int(ry), dists[i]))
+            confirmed.append((i, int(bx), int(by), dists[i]))
 
         # --- Second pass: cluster-dedup (keep closest wrist) ---
         shot_frames: dict = {}
@@ -466,32 +460,45 @@ class ShotTracker2:
         (serve preparation) from a toss apex (ball momentarily stops at the top
         of the arc but was already moving before that).
         """
-        start     = max(0, frame_idx - self.static_run_lookback)
-        run       = 0
-        run_start = None
-        for k in range(start + 1, frame_idx):
+        start         = max(0, frame_idx - self.static_run_lookback)
+        available     = frame_idx - start
+        effective_min = max(2, min(self.static_run_min, available))
+        if available < effective_min:
+            return False
+
+        run           = 0
+        run_start     = None
+        best_run      = 0
+        best_run_start = None
+
+        for k in range(start + 1, frame_idx + 1):
             a, b = centers[k - 1], centers[k]
             if a[0] is None or b[0] is None:
-                run = 0
-                run_start = None
+                run = 0; run_start = None
                 continue
             if np.hypot(a[0] - b[0], a[1] - b[1]) <= self.static_run_px:
                 if run == 0:
                     run_start = k - 1
                 run += 1
-                if run >= self.static_run_min:
-                    if run_start <= start + self.static_run_min:
-                        return True
-                    for m in range(max(0, run_start - 5), run_start):
-                        if m + 1 >= len(centers):
-                            continue
-                        ma, mb = centers[m], centers[m + 1]
-                        if ma[0] is None or mb[0] is None:
-                            continue
-                        if np.hypot(ma[0] - mb[0], ma[1] - mb[1]) > self.static_run_px:
-                            return False
-                    return True
+                if run > best_run:
+                    best_run = run
+                    best_run_start = run_start
             else:
-                run = 0
-                run_start = None
-        return False
+                run = 0; run_start = None
+
+        if best_run < effective_min:
+            return False
+
+        if best_run_start <= start + effective_min:
+            return True  # run starts at the beginning of lookback — no prior history, assume held
+
+        pre_move_px = self.static_run_px
+        for m in range(max(0, best_run_start - 5), best_run_start):
+            if m + 1 >= len(centers):
+                continue
+            ma, mb = centers[m], centers[m + 1]
+            if ma[0] is None or mb[0] is None:
+                continue
+            if np.hypot(ma[0] - mb[0], ma[1] - mb[1]) > pre_move_px:
+                return False
+        return True

@@ -623,10 +623,107 @@ class BallTracker:
 
         x = np.array([c[0] if c[0] is not None else np.nan for c in coords])
         y = np.array([c[1] if c[1] is not None else np.nan for c in coords])
+        n_total = len(x)
 
+        def _fill_fwd(f0, f1, src):
+            pts_x = x[src]
+            pts_y = y[src]
+            ts = np.array(src, dtype=float)
+            vx = float(np.mean(np.diff(pts_x) / np.diff(ts)))
+            vy = float(np.mean(np.diff(pts_y) / np.diff(ts)))
+            anc = src[-1]
+            for f in range(f0, f1):
+                x[f] = x[anc] + (f - anc) * vx
+                y[f] = y[anc] + (f - anc) * vy
+
+        def _fill_bwd(f0, f1, src):
+            pts_x = x[src]
+            pts_y = y[src]
+            ts = np.array(src, dtype=float)
+            vx = float(np.mean(np.diff(pts_x) / np.diff(ts)))
+            vy = float(np.mean(np.diff(pts_y) / np.diff(ts)))
+            anc = src[0]
+            for f in range(f0, f1):
+                x[f] = x[anc] + (f - anc) * vx
+                y[f] = y[anc] + (f - anc) * vy
+
+        def _fill_linear(f0, f1, p0, p1):
+            span = p1 - p0
+            if span == 0:
+                return
+            for f in range(f0, f1):
+                a = (f - p0) / span
+                x[f] = x[p0] + a * (x[p1] - x[p0])
+                y[f] = y[p0] + a * (y[p1] - y[p0])
+
+        i = 0
+        while i < n_total:
+            if not np.isnan(x[i]):
+                i += 1
+                continue
+
+            gap_start = i
+            while i < n_total and np.isnan(x[i]):
+                i += 1
+            gap_end = i
+            n = gap_end - gap_start
+
+            if n <= 7:
+                continue  # leave for linear interpolation below
+
+            ref_w = 3
+            fwd_end = gap_start + n // 2
+
+            pre = []
+            for j in range(gap_start - 1, -1, -1):
+                if not np.isnan(x[j]):
+                    pre.append(j)
+                if len(pre) >= ref_w:
+                    break
+            pre.reverse()
+
+            post = []
+            for j in range(gap_end, n_total):
+                if not np.isnan(x[j]):
+                    post.append(j)
+                if len(post) >= ref_w:
+                    break
+
+            if not pre and not post:
+                continue
+
+            if not pre:
+                if len(post) >= 2:
+                    _fill_bwd(gap_start, gap_end, post)
+                else:
+                    for f in range(gap_start, gap_end):
+                        x[f] = x[post[0]]
+                        y[f] = y[post[0]]
+            elif not post:
+                if len(pre) >= 2:
+                    _fill_fwd(gap_start, gap_end, pre)
+                else:
+                    for f in range(gap_start, gap_end):
+                        x[f] = x[pre[0]]
+                        y[f] = y[pre[0]]
+            else:
+                if len(pre) >= 2:
+                    _fill_fwd(gap_start, fwd_end, pre)
+                else:
+                    _fill_linear(gap_start, fwd_end, pre[0], post[0])
+
+                if len(post) >= 2:
+                    _fill_bwd(fwd_end, gap_end, post)
+                else:
+                    _fill_linear(fwd_end, gap_end, pre[-1], post[0])
+
+        # Gaps of <= 3: existing linear interpolation
         nons, yy = nan_helper(x)
-        x[nons] = np.interp(yy(nons), yy(~nons), x[~nons])
+        if nons.any():
+            x[nons] = np.interp(yy(nons), yy(~nons), x[~nons])
         nans, xx = nan_helper(y)
-        y[nans] = np.interp(xx(nans), xx(~nans), y[~nans])
+        if nans.any():
+            y[nans] = np.interp(xx(nans), xx(~nans), y[~nans])
 
-        return [*zip(x, y)]
+        return [(None, None) if (np.isnan(xi) or np.isnan(yi)) else (xi, yi)
+                for xi, yi in zip(x, y)]
