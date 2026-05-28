@@ -165,20 +165,47 @@ class BallTracker:
                     expected_y = anchor_before[1] + alpha * (anchor_after[1] - anchor_before[1])
                     expected = (expected_x, expected_y)
                 elif anchor_before is not None:
-                    # Only a before-anchor: check raw distance from it, scaled by frame gap
+                    # Only a before-anchor: project velocity from the frame before the
+                    # anchor when available — much more robust than a flat distance
+                    # threshold, because a 90°+ direction change (false detection
+                    # reappearing in the wrong direction after a gap) produces a huge
+                    # extrapolation error even when the raw distance is borderline.
                     gap = i - anchor_before_idx
-                    expected = anchor_before
-                    max_context_dist_scaled = max_context_dist * gap
-                    if distance.euclidean(ball_track[i], expected) > max_context_dist_scaled:
+                    pre_anchor = (
+                        ball_track[anchor_before_idx - 1]
+                        if anchor_before_idx > 0
+                        and ball_track[anchor_before_idx - 1][0] is not None
+                        else None
+                    )
+                    if pre_anchor is not None:
+                        vx = anchor_before[0] - pre_anchor[0]
+                        vy = anchor_before[1] - pre_anchor[1]
+                        expected = (anchor_before[0] + gap * vx,
+                                    anchor_before[1] + gap * vy)
+                    else:
+                        expected = anchor_before
+                    if distance.euclidean(ball_track[i], expected) > max_context_dist * gap:
                         ball_track[i] = (None, None)
                         wiped_any = True
                     continue
                 else:
-                    # Only an after-anchor: same idea
+                    # Only an after-anchor: project velocity backwards from the frame
+                    # after the anchor when available.
                     gap = anchor_after_idx - i
-                    expected = anchor_after
-                    max_context_dist_scaled = max_context_dist * gap
-                    if distance.euclidean(ball_track[i], expected) > max_context_dist_scaled:
+                    post_anchor = (
+                        ball_track[anchor_after_idx + 1]
+                        if anchor_after_idx + 1 < len(ball_track)
+                        and ball_track[anchor_after_idx + 1][0] is not None
+                        else None
+                    )
+                    if post_anchor is not None:
+                        vx = anchor_after[0] - post_anchor[0]
+                        vy = anchor_after[1] - post_anchor[1]
+                        expected = (anchor_after[0] + gap * vx,
+                                    anchor_after[1] + gap * vy)
+                    else:
+                        expected = anchor_after
+                    if distance.euclidean(ball_track[i], expected) > max_context_dist * gap:
                         ball_track[i] = (None, None)
                         wiped_any = True
                     continue
@@ -240,16 +267,47 @@ class BallTracker:
                         ball_track[idx] = (None, None)
                 elif anchor_before is not None:
                     gap = idx - anchor_before_idx
-                    if distance.euclidean(ball_track[idx], anchor_before) > max_context_dist * gap:
+                    pre_anchor = (
+                        ball_track[anchor_before_idx - 1]
+                        if anchor_before_idx > 0
+                        and ball_track[anchor_before_idx - 1][0] is not None
+                        else None
+                    )
+                    if pre_anchor is not None:
+                        vx = anchor_before[0] - pre_anchor[0]
+                        vy = anchor_before[1] - pre_anchor[1]
+                        expected = (anchor_before[0] + gap * vx,
+                                    anchor_before[1] + gap * vy)
+                    else:
+                        expected = anchor_before
+                    if distance.euclidean(ball_track[idx], expected) > max_context_dist * gap:
                         ball_track[idx] = (None, None)
                 else:
                     gap = anchor_after_idx - idx
-                    if distance.euclidean(ball_track[idx], anchor_after) > max_context_dist * gap:
+                    post_anchor = (
+                        ball_track[anchor_after_idx + 1]
+                        if anchor_after_idx + 1 < len(ball_track)
+                        and ball_track[anchor_after_idx + 1][0] is not None
+                        else None
+                    )
+                    if post_anchor is not None:
+                        vx = anchor_after[0] - post_anchor[0]
+                        vy = anchor_after[1] - post_anchor[1]
+                        expected = (anchor_after[0] + gap * vx,
+                                    anchor_after[1] + gap * vy)
+                    else:
+                        expected = anchor_after
+                    if distance.euclidean(ball_track[idx], expected) > max_context_dist * gap:
                         ball_track[idx] = (None, None)
-        # Spike pass: single detection flanked by two real neighbors where both distances
-        # exceed max_dist.  The first-pass loop misses this when the list-mutation-during-
-        # iteration bug causes the frame to be skipped, and the isolated/paired passes skip
-        # it because neither neighbor is None.
+        # Spike pass: single detection flanked by two real neighbors.
+        # Primary condition: both absolute distances exceed max_dist.
+        # Secondary condition: velocity-relative + roundtrip detour check catches
+        # spikes where d_prev is just under max_dist because the ball is moving
+        # slowly (e.g. d_prev=99px vs max_dist=100 when local speed is ~12px/frame).
+        #   - velocity-relative: jump IN must be >> local rolling ball speed
+        #   - roundtrip detour:  d_prev + d_next >> direct distance i-1 → i+1,
+        #     meaning the frame is a detour off the real path, not a direction change
+        #     (a genuine shot continues in the new direction so roundtrip ≈ direct)
         for i in range(1, len(ball_track) - 1):
             if ball_track[i][0] is None:
                 continue
@@ -259,6 +317,20 @@ class BallTracker:
             d_next = distance.euclidean(ball_track[i], ball_track[i + 1])
             if d_prev > max_dist and d_next > max_dist:
                 ball_track[i] = (None, None)
+                continue
+            # Velocity-relative + roundtrip check
+            local_dists = [
+                distance.euclidean(ball_track[k - 1], ball_track[k])
+                for k in range(max(1, i - 5), i)
+                if ball_track[k][0] is not None and ball_track[k - 1][0] is not None
+            ]
+            if local_dists:
+                local_speed = float(np.median(local_dists))
+                if local_speed > 0:
+                    direct = distance.euclidean(ball_track[i - 1], ball_track[i + 1])
+                    if (d_prev > max(max_dist * 0.7, local_speed * 4.0) and
+                            d_prev + d_next > 2.0 * max(direct, 1.0)):
+                        ball_track[i] = (None, None)
 
         # Startup prefix pass: catch 1–2 bogus frames at the start of a consecutive run
         # (right after a None gap) that are internally coherent but make a large jump into
@@ -400,6 +472,130 @@ class BallTracker:
                             ball_track[k] = (None, None)
 
             i = run_end + 1
+
+        # Final cleanup: the structural passes above (startup-prefix, tail-suffix,
+        # stale-run) can wipe frames that were previously shielding a pair or
+        # isolated detection from being recognised as such.  The first isolated /
+        # paired passes ran before those structural wipes, so they missed the newly
+        # exposed orphans.  Re-run both passes once more to catch them.
+        # Example: startup-prefix wipes frames 76-77, leaving 78-79 as an orphan
+        # pair with prev_none=True — invisible to the original paired pass.
+        while True:
+            wiped_any = False
+            for i in range(len(ball_track)):
+                if ball_track[i][0] is None:
+                    continue
+                prev_none = (i == 0) or (ball_track[i - 1][0] is None)
+                next_none = (i == len(ball_track) - 1) or (ball_track[i + 1][0] is None)
+                if not (prev_none and next_none):
+                    continue
+                anchor_before = None
+                anchor_before_idx = None
+                for j in range(i - 1, max(i - 1 - context_window, -1), -1):
+                    if ball_track[j][0] is not None:
+                        anchor_before = ball_track[j]; anchor_before_idx = j; break
+                anchor_after = None
+                anchor_after_idx = None
+                for j in range(i + 1, min(i + 1 + context_window, len(ball_track))):
+                    if ball_track[j][0] is not None:
+                        anchor_after = ball_track[j]; anchor_after_idx = j; break
+                if anchor_before is None and anchor_after is None:
+                    continue
+                if anchor_before is not None and anchor_after is not None:
+                    alpha = (i - anchor_before_idx) / (anchor_after_idx - anchor_before_idx)
+                    ex = anchor_before[0] + alpha * (anchor_after[0] - anchor_before[0])
+                    ey = anchor_before[1] + alpha * (anchor_after[1] - anchor_before[1])
+                    if distance.euclidean(ball_track[i], (ex, ey)) > max_context_dist:
+                        ball_track[i] = (None, None); wiped_any = True
+                elif anchor_before is not None:
+                    gap = i - anchor_before_idx
+                    pre_anchor = (
+                        ball_track[anchor_before_idx - 1]
+                        if anchor_before_idx > 0
+                        and ball_track[anchor_before_idx - 1][0] is not None else None
+                    )
+                    expected = (
+                        (anchor_before[0] + gap * (anchor_before[0] - pre_anchor[0]),
+                         anchor_before[1] + gap * (anchor_before[1] - pre_anchor[1]))
+                        if pre_anchor is not None else anchor_before
+                    )
+                    if distance.euclidean(ball_track[i], expected) > max_context_dist * gap:
+                        ball_track[i] = (None, None); wiped_any = True
+                else:
+                    gap = anchor_after_idx - i
+                    post_anchor = (
+                        ball_track[anchor_after_idx + 1]
+                        if anchor_after_idx + 1 < len(ball_track)
+                        and ball_track[anchor_after_idx + 1][0] is not None else None
+                    )
+                    expected = (
+                        (anchor_after[0] + gap * (anchor_after[0] - post_anchor[0]),
+                         anchor_after[1] + gap * (anchor_after[1] - post_anchor[1]))
+                        if post_anchor is not None else anchor_after
+                    )
+                    if distance.euclidean(ball_track[i], expected) > max_context_dist * gap:
+                        ball_track[i] = (None, None); wiped_any = True
+            if not wiped_any:
+                break
+
+        for i in range(len(ball_track) - 1):
+            if ball_track[i][0] is None or ball_track[i + 1][0] is None:
+                continue
+            prev_none = (i == 0) or (ball_track[i - 1][0] is None)
+            next_none = (i + 1 == len(ball_track) - 1) or (ball_track[i + 2][0] is None)
+            if not (prev_none and next_none):
+                continue
+            for idx in [i, i + 1]:
+                if ball_track[idx][0] is None:
+                    continue
+                anchor_before = None; anchor_before_idx = None
+                for j in range(idx - 1, max(idx - 1 - context_window, -1), -1):
+                    if j == (i + 1 if idx == i else i):
+                        continue
+                    if ball_track[j][0] is not None:
+                        anchor_before = ball_track[j]; anchor_before_idx = j; break
+                anchor_after = None; anchor_after_idx = None
+                for j in range(idx + 1, min(idx + 1 + context_window, len(ball_track))):
+                    if j == (i + 1 if idx == i else i):
+                        continue
+                    if ball_track[j][0] is not None:
+                        anchor_after = ball_track[j]; anchor_after_idx = j; break
+                if anchor_before is None and anchor_after is None:
+                    continue
+                if anchor_before is not None and anchor_after is not None:
+                    alpha = (idx - anchor_before_idx) / (anchor_after_idx - anchor_before_idx)
+                    ex = anchor_before[0] + alpha * (anchor_after[0] - anchor_before[0])
+                    ey = anchor_before[1] + alpha * (anchor_after[1] - anchor_before[1])
+                    if distance.euclidean(ball_track[idx], (ex, ey)) > max_context_dist:
+                        ball_track[idx] = (None, None)
+                elif anchor_before is not None:
+                    gap = idx - anchor_before_idx
+                    pre_anchor = (
+                        ball_track[anchor_before_idx - 1]
+                        if anchor_before_idx > 0
+                        and ball_track[anchor_before_idx - 1][0] is not None else None
+                    )
+                    expected = (
+                        (anchor_before[0] + gap * (anchor_before[0] - pre_anchor[0]),
+                         anchor_before[1] + gap * (anchor_before[1] - pre_anchor[1]))
+                        if pre_anchor is not None else anchor_before
+                    )
+                    if distance.euclidean(ball_track[idx], expected) > max_context_dist * gap:
+                        ball_track[idx] = (None, None)
+                else:
+                    gap = anchor_after_idx - idx
+                    post_anchor = (
+                        ball_track[anchor_after_idx + 1]
+                        if anchor_after_idx + 1 < len(ball_track)
+                        and ball_track[anchor_after_idx + 1][0] is not None else None
+                    )
+                    expected = (
+                        (anchor_after[0] + gap * (anchor_after[0] - post_anchor[0]),
+                         anchor_after[1] + gap * (anchor_after[1] - post_anchor[1]))
+                        if post_anchor is not None else anchor_after
+                    )
+                    if distance.euclidean(ball_track[idx], expected) > max_context_dist * gap:
+                        ball_track[idx] = (None, None)
 
         return ball_track
 
