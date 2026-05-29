@@ -668,11 +668,11 @@ class BallTracker:
             gap_end = i
             n = gap_end - gap_start
 
-            if n <= 7:
+            if n <= 6:
                 continue  # leave for linear interpolation below
 
             ref_w = 3
-            fwd_end = gap_start + n // 2
+            fwd_end = gap_start + (n + 1) // 2
 
             pre = []
             for j in range(gap_start - 1, -1, -1):
@@ -693,12 +693,11 @@ class BallTracker:
                 continue
 
             if not pre:
-                if len(post) >= 2:
-                    _fill_bwd(gap_start, gap_end, post)
-                else:
-                    for f in range(gap_start, gap_end):
-                        x[f] = x[post[0]]
-                        y[f] = y[post[0]]
+                # Gap touches the start of the clip — no history to project
+                # from, so leave these frames as NaN rather than back-filling
+                # from the earliest detections.  Interpolating here would place
+                # the ball at a position it was never seen at.
+                pass
             elif not post:
                 if len(pre) >= 2:
                     _fill_fwd(gap_start, gap_end, pre)
@@ -707,23 +706,50 @@ class BallTracker:
                         x[f] = x[pre[0]]
                         y[f] = y[pre[0]]
             else:
-                if len(pre) >= 2:
-                    _fill_fwd(gap_start, fwd_end, pre)
+                # If the ball jumped too far between the pre and post anchors,
+                # the gap almost certainly spans a fast shot or a bad detection —
+                # not a bounce.  Fall back to a single linear segment so we don't
+                # create an artificial kink at the midpoint.
+                anchor_dist = ((x[post[0]] - x[pre[-1]]) ** 2 +
+                               (y[post[0]] - y[pre[-1]]) ** 2) ** 0.5
+                if anchor_dist > 300:
+                    _fill_linear(gap_start, gap_end, pre[-1], post[0])
                 else:
-                    _fill_linear(gap_start, fwd_end, pre[0], post[0])
+                    # First half: project forward using the pre-gap slope.
+                    if len(pre) >= 2:
+                        _fill_fwd(gap_start, fwd_end, pre)
+                    else:
+                        _fill_linear(gap_start, fwd_end, pre[0], post[0])
 
-                if len(post) >= 2:
-                    _fill_bwd(fwd_end, gap_end, post)
-                else:
-                    _fill_linear(fwd_end, gap_end, pre[-1], post[0])
+                    # Second half: straight line from the last forward-filled
+                    # frame to the first real post-gap detection.  This avoids
+                    # back-projecting the post-gap slope (which can overshoot
+                    # badly on bounces or direction changes) and instead simply
+                    # connects what we know on the right to what we just filled
+                    # on the left.
+                    _fill_linear(fwd_end, gap_end, fwd_end - 1, post[0])
 
-        # Gaps of <= 3: existing linear interpolation
+        # Gaps of <= 3: linear interpolation for interior gaps only.
+        # Leading NaN frames (before the first detection) are intentionally
+        # left unfilled.  np.interp clamps to the first/last known value for
+        # out-of-range indices, which would silently fill start-of-clip gaps
+        # with the first detected position — placing the ball somewhere it
+        # was never actually seen.
         nons, yy = nan_helper(x)
-        if nons.any():
-            x[nons] = np.interp(yy(nons), yy(~nons), x[~nons])
+        if nons.any() and (~nons).any():
+            first_known = int(np.where(~nons)[0][0])
+            interior = nons.copy()
+            interior[:first_known] = False   # exclude leading NaNs
+            if interior.any():
+                x[interior] = np.interp(yy(interior), yy(~nons), x[~nons])
+
         nans, xx = nan_helper(y)
-        if nans.any():
-            y[nans] = np.interp(xx(nans), xx(~nans), y[~nans])
+        if nans.any() and (~nans).any():
+            first_known = int(np.where(~nans)[0][0])
+            interior = nans.copy()
+            interior[:first_known] = False   # exclude leading NaNs
+            if interior.any():
+                y[interior] = np.interp(xx(interior), xx(~nans), y[~nans])
 
         return [(None, None) if (np.isnan(xi) or np.isnan(yi)) else (xi, yi)
                 for xi, yi in zip(x, y)]

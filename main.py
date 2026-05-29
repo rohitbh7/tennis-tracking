@@ -175,7 +175,7 @@ def main():
     )
     args = parser.parse_args()
  
-    input_video_path = "input_videos/game/point 4.mp4"
+    input_video_path = "input_videos/sinner_alcaraz_point.mp4"
     video_frames = read_video(input_video_path)
  
     # Court
