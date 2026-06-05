@@ -23,10 +23,14 @@ class BallTracker:
 
     def detect_frames(self, frames, extrapolation=True):
         ball_track, dists = self._infer(frames)
+        # Free model and intermediate tensors immediately after inference to
+        # avoid a deferred GC of PyTorch CPU tensors crashing native code later.
+        self.model.cpu()
+        import torch as _torch
+        _torch.set_num_threads(1)
+
         ball_track = self._remove_outliers(ball_track, dists)
         if extrapolation:
-            none_frames = [i for i, (x, y) in enumerate(ball_track) if x is None]
-            print("None frames before split:", none_frames)
             subtracks = self._split_track(ball_track)
             for r in subtracks:
                 ball_subtrack = ball_track[r[0]:r[1]]
@@ -607,7 +611,12 @@ class BallTracker:
         result = []
         for i, (k, l) in enumerate(groups):
             if (k == 1) & (i > 0) & (i < len(groups) - 1):
-                dist = distance.euclidean(ball_track[cursor - 1], ball_track[cursor + l])
+                prev = ball_track[cursor - 1]
+                nxt = ball_track[cursor + l]
+                if prev[0] is None or nxt[0] is None:
+                    cursor += l
+                    continue
+                dist = distance.euclidean(prev, nxt)
                 if (l >= max_gap) | (dist / l > max_dist_gap):
                     if cursor - min_value > min_track:
                         result.append([min_value, cursor])

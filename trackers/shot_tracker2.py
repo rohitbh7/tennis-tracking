@@ -115,6 +115,9 @@ class ShotTracker2:
         dict  frame_index -> (ball_cx, ball_cy, shot_label, player_num)
               shot_label is one of: 'FOREHAND', 'BACKHAND', 'SMASH', 'SERVE'
         """
+        # Store for use by _classify_shot's overhead lookback
+        self._ball_positions = ball_positions
+
         n       = len(ball_positions)
         centers = self._extract_centers(ball_positions)
         dists   = self._wrist_ball_distances(centers, pose_detections, n)
@@ -330,28 +333,46 @@ class ShotTracker2:
             head_y = nose_y
 
         if has_nose or shoulder_ys:
-            vertical_dist   = head_y - ball_y
-            horizontal_dist = abs(ball_x - player_cx)
+            # The shot detector fires slightly after true contact — by the
+            # detected frame the ball has already left the strike point and
+            # dropped.  Look back up to 3 frames and use the highest ball
+            # position (smallest y) found in that window: that is the best
+            # approximation of where the ball was at actual contact, which
+            # matters for the overhead / serve gate.
+            lookback = 3
+            overhead_ball_y = ball_y
+            overhead_ball_x = ball_x
+            for offset in range(1, lookback + 1):
+                prior = frame_idx - offset
+                if prior < 0:
+                    break
+                px, py = self._get_ball_xy(self._ball_positions, prior)
+                if px is not None and py is not None and py < overhead_ball_y:
+                    overhead_ball_y = py
+                    overhead_ball_x = px
+
+            vertical_dist   = head_y - overhead_ball_y
+            horizontal_dist = abs(overhead_ball_x - player_cx)
             min_vertical_px = 20
 
-        if vertical_dist > min_vertical_px and vertical_dist > 1.2 * horizontal_dist:
-            ankle_ys = []
-            for ji in _ANKLE_JOINTS:
-                if ji >= len(hitting_player):
-                    continue
-                ax, ay = hitting_player[ji]
-                if ax == 0 and ay == 0:
-                    continue
-                ankle_ys.append(float(ay))
-            if ankle_ys:
-                ankle_y_mean = float(np.mean(ankle_ys))
-                if player_num == 1:
-                    at_baseline = ankle_y_mean < frame_height * self.baseline_fraction
+            if vertical_dist > min_vertical_px and vertical_dist > 1.2 * horizontal_dist:
+                ankle_ys = []
+                for ji in _ANKLE_JOINTS:
+                    if ji >= len(hitting_player):
+                        continue
+                    ax, ay = hitting_player[ji]
+                    if ax == 0 and ay == 0:
+                        continue
+                    ankle_ys.append(float(ay))
+                if ankle_ys:
+                    ankle_y_mean = float(np.mean(ankle_ys))
+                    if player_num == 1:
+                        at_baseline = ankle_y_mean < frame_height * self.baseline_fraction
+                    else:
+                        at_baseline = ankle_y_mean > frame_height * (1.0 - self.baseline_fraction)
+                    return ('SERVE' if at_baseline else 'SMASH'), player_num
                 else:
-                    at_baseline = ankle_y_mean > frame_height * (1.0 - self.baseline_fraction)
-                return ('SERVE' if at_baseline else 'SMASH'), player_num
-            else:
-                return 'SMASH', player_num
+                    return 'SMASH', player_num
 
         # --- 5. Groundstroke: FOREHAND vs BACKHAND ---
         ball_is_left = ball_x < player_cx
@@ -370,6 +391,19 @@ class ShotTracker2:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _get_ball_xy(self, ball_positions: list, frame_idx: int):
+        """Return (x, y) for the given frame, or (None, None) if missing."""
+        if frame_idx < 0 or frame_idx >= len(ball_positions):
+            return None, None
+        pos = ball_positions[frame_idx]
+        if isinstance(pos, dict):
+            bbox = pos.get(1, [])
+            if bbox and len(bbox) >= 4:
+                return (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+            return None, None
+        x, y = pos
+        return (x, y) if x is not None else (None, None)
 
     def _extract_centers(self, ball_positions: list) -> list:
         """Convert ball_positions to a list of (x, y) or (None, None)."""
