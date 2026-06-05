@@ -46,8 +46,14 @@ def draw_axes(frames):
     return output
 
 def save_video(output_video_frames, output_video_path):
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Changed from MJPG
-    out = cv2.VideoWriter(output_video_path, fourcc, 24, (output_video_frames[0].shape[1], output_video_frames[0].shape[0]))
+    h, w = output_video_frames[0].shape[:2]
+    # Try H.264 first (browser-compatible); fall back to mp4v if unavailable.
+    for fourcc_str in ('avc1', 'H264', 'mp4v'):
+        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        out = cv2.VideoWriter(output_video_path, fourcc, 24, (w, h))
+        if out.isOpened():
+            break
+        out.release()
     for frame in output_video_frames:
         out.write(frame)
     out.release()
