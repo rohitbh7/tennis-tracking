@@ -13,6 +13,9 @@ import tempfile
 from pathlib import Path
 
 import cv2
+import pandas as pd
+
+from court_viz import build_serve_figure
 import numpy as np
 import streamlit as st
 
@@ -386,36 +389,69 @@ col3.metric("Points analysed",        len(clips))
 
 st.divider()
 
-# ── Video tabs ────────────────────────────────────────────────────────────────
-tab_labels = [f"Point {c['point_id']} — {c['filename']}" for c in clips]
+tab_results, tab_dash = st.tabs(["📹 Videos & Downloads", "🎾 Serve Dashboard"])
 
-col_in, col_out = st.columns(2)
+# ── Tab 1: Videos & CSV downloads ─────────────────────────────────────────────
+with tab_results:
+    tab_labels = [f"Point {c['point_id']} — {c['filename']}" for c in clips]
 
-with col_in:
-    st.subheader("Input")
-    if len(clips) == 1:
-        st.video(clips[0]["input_path"])
+    col_in, col_out = st.columns(2)
+
+    with col_in:
+        st.subheader("Input")
+        if len(clips) == 1:
+            st.video(clips[0]["input_path"])
+        else:
+            for tab, clip in zip(st.tabs(tab_labels), clips):
+                with tab:
+                    st.caption(f"{clip['n_shots']} shot(s) · {clip['n_bounces']} bounce(s)")
+                    st.video(clip["input_path"])
+
+    with col_out:
+        st.subheader("Output (annotated)")
+        if len(clips) == 1:
+            st.video(clips[0]["output_h264"])
+        else:
+            for tab, clip in zip(st.tabs(tab_labels), clips):
+                with tab:
+                    st.caption(f"{clip['n_shots']} shot(s) · {clip['n_bounces']} bounce(s)")
+                    st.video(clip["output_h264"])
+
+    st.divider()
+    st.subheader("📥 Download CSVs")
+    dl1, dl2, dl3, dl4 = st.columns(4)
+    dl1.download_button("⬇ events.csv",          r["csv_events"], "events.csv",          "text/csv", use_container_width=True)
+    dl2.download_button("⬇ ball_coords.csv",     r["csv_ball"],   "ball_coords.csv",     "text/csv", use_container_width=True)
+    dl3.download_button("⬇ pose_joints.csv",     r["csv_pose"],   "pose_joints.csv",     "text/csv", use_container_width=True)
+    dl4.download_button("⬇ court_keypoints.csv", r["csv_court"],  "court_keypoints.csv", "text/csv", use_container_width=True)
+
+# ── Tab 2: Serve Dashboard ────────────────────────────────────────────────────
+with tab_dash:
+    df_court_mem  = pd.read_csv(io.StringIO(r["csv_court"]))
+    df_ball_mem   = pd.read_csv(io.StringIO(r["csv_ball"]))
+    df_events_mem = pd.read_csv(io.StringIO(r["csv_events"]))
+
+    is_multi_dash = "point" in df_court_mem.columns
+    fc1, fc2, fc3, fc4 = st.columns(4)
+
+    if is_multi_dash:
+        all_pts = sorted(df_court_mem["point"].unique())
+        dash_pts = fc1.multiselect("Point", all_pts, default=all_pts,
+                                   format_func=lambda p: f"Point {p}", key="dash_pts")
     else:
-        for tab, clip in zip(st.tabs(tab_labels), clips):
-            with tab:
-                st.caption(f"{clip['n_shots']} shot(s) · {clip['n_bounces']} bounce(s)")
-                st.video(clip["input_path"])
+        dash_pts = None
+        fc1.empty()
 
-with col_out:
-    st.subheader("Output (annotated)")
-    if len(clips) == 1:
-        st.video(clips[0]["output_h264"])
-    else:
-        for tab, clip in zip(st.tabs(tab_labels), clips):
-            with tab:
-                st.caption(f"{clip['n_shots']} shot(s) · {clip['n_bounces']} bounce(s)")
-                st.video(clip["output_h264"])
+    dash_players = fc2.multiselect("Player", ["player 1", "player 2"],
+                                   default=["player 1", "player 2"],
+                                   format_func=lambda p: p.title(), key="dash_players")
+    dash_sides   = fc3.multiselect("Court side", ["Deuce", "Ad"],
+                                   default=["Deuce", "Ad"], key="dash_sides")
 
-# ── CSV downloads ─────────────────────────────────────────────────────────────
-st.divider()
-st.subheader("📥 Download CSVs")
-dl1, dl2, dl3, dl4 = st.columns(4)
-dl1.download_button("⬇ events.csv",          r["csv_events"], "events.csv",          "text/csv", use_container_width=True)
-dl2.download_button("⬇ ball_coords.csv",     r["csv_ball"],   "ball_coords.csv",     "text/csv", use_container_width=True)
-dl3.download_button("⬇ pose_joints.csv",     r["csv_pose"],   "pose_joints.csv",     "text/csv", use_container_width=True)
-dl4.download_button("⬇ court_keypoints.csv", r["csv_court"],  "court_keypoints.csv", "text/csv", use_container_width=True)
+    fig = build_serve_figure(
+        df_court_mem, df_ball_mem, df_events_mem,
+        selected_players=dash_players,
+        selected_sides=dash_sides,
+        selected_points=dash_pts,
+    )
+    st.plotly_chart(fig, use_container_width=True)

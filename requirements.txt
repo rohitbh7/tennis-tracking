@@ -2,3 +2,4 @@ ultralytics
 lap
 rfdetr
 pandas
+plotly
