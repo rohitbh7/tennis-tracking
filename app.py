@@ -15,7 +15,7 @@ from pathlib import Path
 import cv2
 import pandas as pd
 
-from court_viz import build_serve_figure
+from court_viz import build_serve_figure, build_returner_figure
 import numpy as np
 import streamlit as st
 
@@ -253,9 +253,9 @@ def reencode_h264(src: str, dst: str) -> bool:
 # Streamlit UI
 # ---------------------------------------------------------------------------
 
-st.set_page_config(page_title="Tennis Tracker", page_icon="🎾", layout="wide")
+st.set_page_config(page_title="Tennis Tracker App", page_icon="🎾", layout="wide")
 
-st.title("🎾 Tennis Video Analyser")
+st.title("Tennis Tracker App")
 st.caption(
     "Upload one or more match clips, set each player's dominant hand, "
     "then click **Run Analysis**."
@@ -263,7 +263,7 @@ st.caption(
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Settings")
+    st.header("Settings")
 
     uploaded_files = st.file_uploader(
         "Upload video(s)",
@@ -355,7 +355,7 @@ if run_btn:
                         "court_keypoints": result["court_keypoints"],
                     })
 
-            status.update(label="✅ All clips complete!", state="complete", expanded=False)
+            status.update(label="All clips complete!", state="complete", expanded=False)
 
             csv_events, csv_ball, csv_pose, csv_court = _build_csvs(clips)
 
@@ -368,7 +368,7 @@ if run_btn:
             }
 
         except Exception as exc:
-            status.update(label=f"❌ Error: {exc}", state="error", expanded=True)
+            status.update(label=f"Error: {exc}", state="error", expanded=True)
             st.error(str(exc))
             st.stop()
 
@@ -389,7 +389,7 @@ col3.metric("Points analysed",        len(clips))
 
 st.divider()
 
-tab_results, tab_dash = st.tabs(["📹 Videos & Downloads", "🎾 Serve Dashboard"])
+tab_results, tab_dash = st.tabs(["Videos & Downloads", "Serve Dashboard"])
 
 # ── Tab 1: Videos & CSV downloads ─────────────────────────────────────────────
 with tab_results:
@@ -430,6 +430,7 @@ with tab_dash:
     df_court_mem  = pd.read_csv(io.StringIO(r["csv_court"]))
     df_ball_mem   = pd.read_csv(io.StringIO(r["csv_ball"]))
     df_events_mem = pd.read_csv(io.StringIO(r["csv_events"]))
+    df_pose_mem   = pd.read_csv(io.StringIO(r["csv_pose"]))
 
     is_multi_dash = "point" in df_court_mem.columns
     fc1, fc2, fc3, fc4 = st.columns(4)
@@ -448,10 +449,24 @@ with tab_dash:
     dash_sides   = fc3.multiselect("Court side", ["Deuce", "Ad"],
                                    default=["Deuce", "Ad"], key="dash_sides")
 
-    fig = build_serve_figure(
-        df_court_mem, df_ball_mem, df_events_mem,
-        selected_players=dash_players,
-        selected_sides=dash_sides,
-        selected_points=dash_pts,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    viz_col1, viz_col2 = st.columns(2)
+
+    with viz_col1:
+        st.subheader("Serve bounce locations")
+        fig_serve = build_serve_figure(
+            df_court_mem, df_ball_mem, df_events_mem,
+            selected_players=dash_players,
+            selected_sides=dash_sides,
+            selected_points=dash_pts,
+        )
+        st.plotly_chart(fig_serve, use_container_width=True, key="dash_serve_fig")
+
+    with viz_col2:
+        st.subheader("Returner positions at serve")
+        fig_ret = build_returner_figure(
+            df_court_mem, df_ball_mem, df_events_mem, df_pose_mem,
+            selected_players=dash_players,
+            selected_sides=dash_sides,
+            selected_points=dash_pts,
+        )
+        st.plotly_chart(fig_ret, use_container_width=True, key="dash_ret_fig")

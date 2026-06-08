@@ -297,3 +297,241 @@ def build_serve_figure(
         autosize=True,
     )
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Shared court-drawing helper
+# ---------------------------------------------------------------------------
+
+def _make_near_half_fig(kp: dict, net_l, net_r, net_ls, net_rs, net_c):
+    """Return a Figure with just the near-half court surface and lines drawn."""
+    near_poly_x = [net_l[0], net_r[0], kp[3][0], kp[2][0], net_l[0]]
+    near_poly_y = [net_l[1], net_r[1], kp[3][1], kp[2][1], net_l[1]]
+    all_x = near_poly_x + [kp[2][0], kp[3][0]]
+    all_y = near_poly_y + [kp[2][1], kp[3][1]]
+    pad_x = (max(all_x) - min(all_x)) * 0.12
+    pad_y = (max(all_y) - min(all_y)) * 0.15
+    x_min, x_max = min(all_x) - pad_x, max(all_x) + pad_x
+    y_min, y_max = min(all_y) - pad_y, max(all_y) + pad_y
+
+    fig = go.Figure()
+    fig.add_shape(type="rect", x0=x_min, y0=y_min, x1=x_max, y1=y_max,
+                  fillcolor="#1a3a28", line_width=0, layer="below")
+    fig.add_trace(go.Scatter(
+        x=near_poly_x, y=near_poly_y,
+        fill="toself", fillcolor="#2D6A4F",
+        line=dict(width=0), mode="lines",
+        hoverinfo="skip", showlegend=False,
+    ))
+    for pa, pb, group, lw in [
+        (kp[2],   kp[3],   "baseline",         3),
+        (net_l,   kp[2],   "doubles sideline",  3),
+        (net_r,   kp[3],   "doubles sideline",  3),
+        (net_ls,  kp[5],   "singles sideline",  2),
+        (net_rs,  kp[7],   "singles sideline",  2),
+        (kp[10],  kp[11],  "service line",      2),
+        (net_c,   kp[13],  "centre line",       2),
+        (net_l,   net_r,   "net",               4),
+    ]:
+        fig.add_trace(go.Scatter(
+            x=[pa[0], pb[0]], y=[pa[1], pb[1]],
+            mode="lines",
+            line=dict(color=LINE_COLORS.get(group, "#FFF"), width=lw,
+                      dash="dash" if group == "net" else "solid"),
+            hoverinfo="skip", showlegend=False,
+        ))
+    fig.update_layout(
+        paper_bgcolor="#1a1a2e", plot_bgcolor="#1a3a28",
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False,
+                   scaleanchor="y", scaleratio=1, range=[x_min, x_max]),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False,
+                   range=[y_max, y_min]),
+        showlegend=False,
+        margin=dict(l=10, r=10, t=30, b=10),
+        autosize=True,
+    )
+    return fig, x_min, x_max, y_min, y_max
+
+
+def _get_returner_pos(df_pose, frame, point_id, server_player, is_multi):
+    """
+    Return (x, y) image coords of the returner's hip midpoint at the given frame,
+    or (None, None) if pose data is unavailable.
+
+    server_player: "player 1" or "player 2"
+    returner column: "player2_x/y" if server is player 1, else "player1_x/y"
+    """
+    if df_pose is None or df_pose.empty:
+        return None, None
+
+    xcol = "player2_x" if server_player == "player 1" else "player1_x"
+    ycol = "player2_y" if server_player == "player 1" else "player1_y"
+
+    if is_multi and "point" in df_pose.columns:
+        rows = df_pose[(df_pose["point"] == point_id) & (df_pose["frame"] == frame)]
+    else:
+        rows = df_pose[df_pose["frame"] == frame]
+
+    # Prefer ankles (joints 15, 16 = left_ankle, right_ankle), fall back to all joints
+    ankle_rows = rows[rows["joint"].isin([15, 16])]
+    use = ankle_rows if not ankle_rows.empty else rows
+
+    if use.empty:
+        return None, None
+
+    xs = use[xcol].dropna()
+    ys = use[ycol].dropna()
+    # Exclude zero values (undetected joints)
+    xs = xs[xs != 0]
+    ys = ys[ys != 0]
+
+    if xs.empty or ys.empty:
+        return None, None
+
+    return float(xs.mean()), float(ys.mean())
+
+
+# ---------------------------------------------------------------------------
+# Returner position figure
+# ---------------------------------------------------------------------------
+
+def build_returner_figure(
+    df_court: pd.DataFrame,
+    df_ball: pd.DataFrame | None,
+    df_events: pd.DataFrame | None,
+    df_pose: pd.DataFrame | None,
+    selected_players: list | None = None,
+    selected_sides: list | None = None,
+    selected_points: list | None = None,
+) -> go.Figure:
+    """
+    Build the near-half tennis court figure showing where the returner was
+    standing at the moment of each serve.
+
+    Filters match build_serve_figure: selecting "player 1" means serves hit by
+    player 1, so the returner shown will be player 2's position, and vice versa.
+    """
+    is_multi = "point" in df_court.columns
+
+    # Reference court
+    if is_multi:
+        all_pts = sorted(df_court["point"].unique())
+        pts = selected_points if selected_points else all_pts
+        ref_pid = pts[0] if pts else all_pts[0]
+        court_kp_df = df_court[df_court["point"] == ref_pid]
+    else:
+        court_kp_df = df_court
+        pts = None
+
+    H_ref, H_ref_inv = _build_homographies(court_kp_df)
+    point_H_inv: dict = {}
+    if is_multi:
+        for pid, grp in df_court.groupby("point"):
+            try:
+                _, h_inv = _build_homographies(grp)
+                point_H_inv[pid] = h_inv
+            except Exception:
+                pass
+
+    net_l   = _rw_to_img( 0.0, 39.0, H_ref)
+    net_r   = _rw_to_img(36.0, 39.0, H_ref)
+    net_ls  = _rw_to_img( 4.5, 39.0, H_ref)
+    net_rs  = _rw_to_img(31.5, 39.0, H_ref)
+    net_c   = _rw_to_img(18.0, 39.0, H_ref)
+    kp = {int(r["keypoint_id"]): (float(r["x"]), float(r["y"]))
+          for _, r in court_kp_df.iterrows()}
+
+    fig, x_min, x_max, y_min, y_max = _make_near_half_fig(
+        kp, net_l, net_r, net_ls, net_rs, net_c)
+
+    if df_events is None or df_events.empty:
+        return fig
+
+    # Get serve events and apply filters (same logic as build_serve_figure)
+    serves = df_events[df_events["event"] == "SERVE"].copy()
+    if is_multi and pts is not None:
+        serves = serves[serves["point"].isin(pts)]
+
+    serves["_player"]     = serves["player"].apply(_player_val)
+    serves["_court_side"] = ""
+
+    # Compute court side for each serve
+    if df_ball is not None:
+        for idx, row in serves.iterrows():
+            frame = int(row["frame"])
+            src_pid = row["point"] if (is_multi and "point" in row.index
+                                       and not pd.isna(row.get("point"))) else None
+            if is_multi and "point" in df_ball.columns:
+                brow = df_ball[(df_ball["point"] == row["point"]) &
+                               (df_ball["frame"] == frame)]
+            else:
+                brow = df_ball[df_ball["frame"] == frame]
+
+            if not brow.empty:
+                bx, by = float(brow["ball_x"].iloc[0]), float(brow["ball_y"].iloc[0])
+                if not (np.isnan(bx) or np.isnan(by)):
+                    h_inv = point_H_inv.get(src_pid, H_ref_inv)
+                    x_rw, y_rw = _img_to_rw(bx, by, h_inv)
+                    serves.at[idx, "_court_side"] = _court_side(x_rw, y_rw)
+
+    if selected_players:
+        serves = serves[serves["_player"].isin(selected_players)]
+    if selected_sides:
+        serves = serves[serves["_court_side"].isin(selected_sides)]
+
+    if serves.empty:
+        return fig
+
+    # For each filtered serve, get returner's position from pose data
+    xs, ys, labels = [], [], []
+    for _, row in serves.iterrows():
+        frame   = int(row["frame"])
+        player  = row["_player"]
+        side    = row["_court_side"]
+        src_pid = row["point"] if (is_multi and "point" in row.index
+                                   and not pd.isna(row.get("point"))) else None
+        point_label = str(int(src_pid)) if src_pid is not None else ""
+
+        rx, ry = _get_returner_pos(df_pose, frame, src_pid, player, is_multi)
+        if rx is None:
+            continue
+
+        # Convert image → real-world using this point's homography
+        h_inv_src = point_H_inv.get(src_pid, H_ref_inv)
+        x_rw, y_rw = _img_to_rw(rx, ry, h_inv_src)
+
+        # Transpose far-side returner to near half
+        if y_rw < 39.0:
+            x_rw, y_rw = 36.0 - x_rw, 78.0 - y_rw
+
+        # Re-project onto reference court
+        ix, iy = _rw_to_img(x_rw, y_rw, H_ref)
+
+        returner = "player 2" if player == "player 1" else "player 1"
+        xs.append(ix)
+        ys.append(iy)
+        labels.append(
+            f"Point {point_label}<br>Frame {frame}<br>Server: {player.title()}"
+            f"<br>Returner: {returner.title()}"
+            + (f"<br>{side}" if side else "")
+        )
+
+    if xs:
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="markers",
+            marker=dict(
+                color="#00DDFF",
+                size=12,
+                symbol="circle",
+                line=dict(color="white", width=1.5),
+            ),
+            name="Returner position",
+            hovertemplate="%{text}<extra></extra>",
+            text=labels,
+        ))
+
+    fig.update_layout(
+        xaxis=dict(range=[x_min, x_max]),
+        yaxis=dict(range=[y_max, y_min]),
+    )
+    return fig
